@@ -8,6 +8,7 @@ import logging
 import time
 from datetime import datetime
 import json
+import zlib
 from collections import defaultdict
 from vcore.python.utils.redisproxy import RedisProxy
 
@@ -27,6 +28,7 @@ class RecallFactory(object):
         :param kwargs:
         '''
         self.flag = kwargs.get("flag", "")
+        self.dry_run = self._str2bool(kwargs.get("dry_run", False))
         self.prefix = kwargs.get("prefix", "")
         self.version = kwargs.get("version", "")
         # 每个召回流里面的物料数量
@@ -41,6 +43,12 @@ class RecallFactory(object):
         self.streams = {}
 
         self.counter = defaultdict(int)
+
+    @staticmethod
+    def _str2bool(val):
+        if isinstance(val, bool):
+            return val
+        return str(val).strip().lower() in ("1", "true", "yes", "on")
 
     def get_streaminfo_list(self, mid, minfo):
         '''
@@ -154,6 +162,9 @@ class RecallFactory(object):
         return self.prefix + stream_name + "_" + self.version if self.version else self.prefix + stream_name
 
     def write(self, mid2info):
+        if self.dry_run:
+            self._dry_run_write(mid2info)
+            return
         # 所有stream写redis
         conn = self.rproxy.get_rand_connection("writer")
         pipe = conn.pipeline(transaction=False)
@@ -179,6 +190,27 @@ class RecallFactory(object):
         alert_data = int(time.time())
         pipe.set(alert_key, alert_data, ex=self.expire_time)
         pipe.execute()
+
+    def _dry_run_write(self, mid2info):
+        '''
+        dry-run 模式：只生成倒排内容并打印预览，不写 redis、不写监控。
+        '''
+        for stream_name, stream in self.streams.items():
+            rkey = self.redis_key(stream_name)
+            rdata = self.format(stream_name, stream, mid2info)
+            if not rdata:
+                continue
+            self.counter["stream_num"] += 1
+            try:
+                items = json.loads(zlib.decompress(rdata))
+                num = len(items) if isinstance(items, list) else -1
+            except Exception:
+                items = None
+                num = -1
+            logging.info("[DRY-RUN] key={} num={}".format(rkey, num))
+            if items:
+                logging.info("[DRY-RUN] sample={}".format(json.dumps(items[0], ensure_ascii=False)))
+        logging.info("[DRY-RUN] total stream num = {}".format(self.counter.get("stream_num", 0)))
 
 
     def print_log(self):
