@@ -1,0 +1,4 @@
+[submodule "vcore"]
+	path = vcore
+	url = https://gitlab.weibo.cn/weibo_video_recom/vcore.git
+	branch = master

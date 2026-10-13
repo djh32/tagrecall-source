@@ -1,0 +1,195 @@
+# _*_ coding: utf-8 _*_
+# @Time    : 2019/10/17 2:58 PM
+# @Author  : lijiang3@staff.weibo.com
+# @File    : recallfactory.py
+# 生成召回流的工厂
+
+import logging
+import time
+from datetime import datetime
+import json
+from collections import defaultdict
+from vcore.python.utils.redisproxy import RedisProxy
+
+class RecallStream(object):
+
+    def __init__(self, name):
+        self.name = name
+        # 格式：[(mid, detail), ...]
+        self.midlist = []
+        self.midwithscore = []
+
+class RecallFactory(object):
+
+    def __init__(self, **kwargs):
+        '''
+        参数： prefix = "", version = "", num = 300, redis_addr = ["rm51826.eos.grid.sina.com.cn", 51826, 9, False], expire_time = 30 * 24 * 3600
+        :param kwargs:
+        '''
+        self.flag = kwargs.get("flag", "")
+        self.prefix = kwargs.get("prefix", "")
+        self.version = kwargs.get("version", "")
+        # 每个召回流里面的物料数量
+        self.num = int(kwargs["num"])
+        self.rproxy = RedisProxy()
+        redis_addr = kwargs["redis_addr"]
+        if isinstance(redis_addr, str):
+            redis_addr = json.loads(redis_addr)
+        self.rproxy.new_pool_list("writer", [redis_addr])
+        # 召回流过期时间
+        self.expire_time = kwargs.get("expire_time", 7 * 24 * 3600)
+        self.streams = {}
+
+        self.counter = defaultdict(int)
+
+    def get_streaminfo_list(self, mid, minfo):
+        '''
+            判断一个mid应该放到哪些流里面
+            一个mid可以放到多个recall-stream里面
+            返回的streaminfo: (name, detail)
+        '''
+        return []
+
+    def before_rank(self, mid2info):
+        '''
+        开始排序之前做一些准备工作
+        例如读取一些redis资源
+        :param mid2info:
+        :return:
+        '''
+        pass
+
+    def pre_rank(self, stream_name, stream, mid2info):
+        '''
+        排序前的处理
+        可以再通过规则过滤掉一些mid
+        或者为后续的排序做准备工作
+        :param stream:
+        :param mid2info:
+        :return:
+        '''
+        pass
+
+    def rank(self, stream_name, stream, mid2info):
+        '''
+        排序函数: 默认取全局排序的score
+        :param stream:
+        :param mid2info:
+        :return:
+        '''
+        for mid, detail in stream.midlist:
+            score = mid2info[mid].get("default_score", 0)
+            stream.midwithscore.append((mid, score))
+
+        stream.midwithscore = sorted(stream.midwithscore, reverse=True, key=lambda x:x[1])
+
+    def after_rank(self, stream_name, stream, mid2info):
+        '''
+        排序后的处理。
+        默认需要过滤相同的gid，需要截断操作。
+        默认要过滤掉 gid=""(取不到的情况)
+        10988: 是最新的gid
+        :param stream:
+        :param mid2info:
+        :return:
+        '''
+        tmp = []
+        gidset = set()
+        for mid, score in stream.midwithscore:
+            # 没有gid或者gid已出现
+            gid = mid2info[mid].get("10988", "")
+            if not gid or gid in gidset:
+                continue
+            # 没有被过滤掉
+            tmp.append((mid, score))
+            if len(tmp) >= self.num:
+                break
+            gidset.add(gid)
+
+        stream.midwithscore = tmp
+        return
+
+    def format(self, stream_name, stream, mid2info):
+        '''
+        格式化要写入redis的数据
+        :param stream_name:
+        :param stream:
+        :param mid2info:
+        :return:
+        '''
+        return ""
+
+    def handle(self, midlist, mid2info):
+        '''
+        生成各式各样的召回候选流
+        然后写入到redis
+        :param midlist:
+        :param mid2info:
+        :return:
+        '''
+
+        # 分配mid到各个stream中
+        for mid in midlist:
+            minfo = mid2info.get(mid, {})
+            streaminfo_list = self.get_streaminfo_list(mid, minfo)
+            for stream_name, detail in streaminfo_list:
+                if stream_name not in self.streams:
+                    self.streams[stream_name] = RecallStream(stream_name)
+
+                stream = self.streams[stream_name]
+                stream.midlist.append((mid, detail))
+
+        self.before_rank(mid2info)
+
+        # 每个stream做排序
+        for stream_name, stream in self.streams.items():
+            self.pre_rank(stream_name, stream, mid2info)
+            self.rank(stream_name, stream, mid2info)
+            self.after_rank(stream_name, stream, mid2info)
+
+        # 所有stream写redis
+        self.write(mid2info)
+
+    def redis_key(self, stream_name):
+        return self.prefix + stream_name + "_" + self.version if self.version else self.prefix + stream_name
+
+    def write(self, mid2info):
+        # 所有stream写redis
+        conn = self.rproxy.get_rand_connection("writer")
+        pipe = conn.pipeline(transaction=False)
+        count = 0
+        for stream_name, stream in self.streams.items():
+            rkey = self.redis_key(stream_name)
+            rdata = self.format(stream_name, stream, mid2info)
+            if not rdata:
+                continue
+            pipe.set(rkey, rdata, ex=self.expire_time)
+            count += 1
+            self.counter["stream_num"] += 1
+            if count >= 50:
+                pipe.execute()
+                count = 0
+                pipe = conn.pipeline(transaction=False)
+
+        if count:
+            pipe.execute()
+
+        # 增加监控 eg: newtab_uid_v1_update
+        alert_key = self.prefix + self.version + "_update"
+        alert_data = int(time.time())
+        pipe.set(alert_key, alert_data, ex=self.expire_time)
+        pipe.execute()
+
+
+    def print_log(self):
+        logging.info("******* recall-factory {0} statistic info {1} *********".format(type(self).__name__, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        logging.info("write recall-stream number: {}".format(self.counter.get("stream_num", 0)))
+        #total_mid_count = self._valid_mid_count()
+        #logging.info("mid number in recall-streams: {}".format(total_mid_count))
+
+    def _valid_mid_count(self):
+        midset = set()
+        for stream_name, stream in self.streams.items():
+            for mid, score in stream.midwithscore:
+                midset.add(mid)
+        return len(midset)
