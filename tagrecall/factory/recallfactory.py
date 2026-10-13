@@ -194,11 +194,19 @@ class RecallFactory(object):
     def _dry_run_write(self, mid2info):
         '''
         dry-run 模式：只生成倒排内容并打印预览，不写 redis、不写监控。
+        逐条 key 打印会刷屏（如 TabTagFactory 有 19 万个 stream），因此这里只做：
+        1) 汇总统计（stream 数、总条数、空流数、每流条数 min/avg/max）
+        2) 有限采样（前 SAMPLES 个非空 stream 的 key/num/sample）
         '''
+        SAMPLES = 5
+        nums = []
+        empty = 0
+        samples = []
         for stream_name, stream in self.streams.items():
             rkey = self.redis_key(stream_name)
             rdata = self.format(stream_name, stream, mid2info)
             if not rdata:
+                empty += 1
                 continue
             self.counter["stream_num"] += 1
             try:
@@ -207,10 +215,45 @@ class RecallFactory(object):
             except Exception:
                 items = None
                 num = -1
-            logging.info("[DRY-RUN] key={} num={}".format(rkey, num))
-            if items:
-                logging.info("[DRY-RUN] sample={}".format(json.dumps(items[0], ensure_ascii=False)))
-        logging.info("[DRY-RUN] total stream num = {}".format(self.counter.get("stream_num", 0)))
+            nums.append(num)
+            if len(samples) < SAMPLES:
+                samples.append((rkey, num, items[0] if items else None))
+        self._print_dry_run_summary(self.counter.get("stream_num", 0), nums, empty, samples)
+
+    def _dry_run_write_single(self, mid2info):
+        '''
+        dry-run 模式：single-key 工厂预览（format 返回 list，非压缩 bytes）。
+        不写 redis、不写监控。
+        '''
+        SAMPLES = 5
+        nums = []
+        empty = 0
+        samples = []
+        rkey = self.prefix + self.version
+        for stream_name, stream in self.streams.items():
+            items = self.format(stream_name, stream, mid2info)
+            if not items:
+                empty += 1
+                continue
+            num = len(items)
+            nums.append(num)
+            self.counter["stream_num"] += 1
+            if len(samples) < SAMPLES:
+                samples.append((rkey + "#" + stream_name, num, items[0] if items else None))
+        self._print_dry_run_summary(self.counter.get("stream_num", 0), nums, empty, samples)
+
+    def _print_dry_run_summary(self, stream_num, nums, empty, samples):
+        logging.info("[DRY-RUN] ========== {} ==========".format(type(self).__name__))
+        logging.info("[DRY-RUN] stream_num={} empty_stream_num={}".format(stream_num, empty))
+        if nums:
+            logging.info("[DRY-RUN] items per stream -> min={} avg={:.1f} max={}".format(
+                min(nums), sum(nums) / len(nums), max(nums)))
+            logging.info("[DRY-RUN] total items = {}".format(sum(nums)))
+        for rkey, num, item in samples:
+            logging.info("[DRY-RUN] sample key={} num={}".format(rkey, num))
+            if item is not None:
+                logging.info("[DRY-RUN] sample item={}".format(json.dumps(item, ensure_ascii=False)))
+        logging.info("[DRY-RUN] ========== {} END ==========".format(type(self).__name__))
 
 
     def print_log(self):

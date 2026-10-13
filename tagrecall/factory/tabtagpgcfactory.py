@@ -101,6 +101,9 @@ class TabTagPgcFactory(RecallFactory):
         :param mid2info:
         :return:
         """
+        if self.dry_run:
+            self._dry_run_write_single(mid2info)
+            return
         # 所有stream写 singleKey_values
         conn = self.rproxy.get_rand_connection("writer")
         pipe = conn.pipeline(transaction=False)
