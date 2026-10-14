@@ -37,9 +37,10 @@ class MysqlScanner(MidScanner):
         mid2info = {}
         start_id = 0
         while True:
-            # 扫描时把物料的 status/created_at/expired_at/updated_at 一并取出，
-            # 用于后续排查「无 uid 物料是否因过期/下线导致」
-            sql = "select id, status, created_at, expired_at, updated_at from {} where id > {} order by id limit {}".format(self.table, start_id, self.batch_n)
+            # 直接从物料表取 uid，回填为作者特征（fid=100307）。
+            # 100307 与表 uid 严格同义；WAIC 侧该特征可能缺失导致物料被误过滤，
+            # 这里用 MySQL 表 uid 兜底，保证作者倒排完整。
+            sql = "select id, uid from {} where id > {} order by id limit {}".format(self.table, start_id, self.batch_n)
             # print(sql)
             self.cursor.execute(sql)
             result = self.cursor.fetchall()
@@ -53,12 +54,8 @@ class MysqlScanner(MidScanner):
                 if mid in mid2info:
                     continue
                 midlist.append(mid)
-                mid2info[mid] = {
-                    "status": row[1],
-                    "created_at": str(row[2]) if row[2] is not None else "",
-                    "expired_at": str(row[3]) if row[3] is not None else "",
-                    "updated_at": str(row[4]) if row[4] is not None else "",
-                }
+                # WAIC 有 100307 时会覆盖为同值；缺失时保留此回填值。
+                mid2info[mid] = {"100307": str(row[1]) if row[1] is not None else ""}
 
         self.counter["cost"] = int(time.time() - st)
         self.counter["total"] = len(midlist)
@@ -68,12 +65,12 @@ class MysqlScanner(MidScanner):
     def get_mids_test(self, **kwargs):
         start_id = 0
         batch_n = 100
-        sql = "select id from {} where id > {} order by id limit {}".format(self.table, start_id, batch_n)
+        sql = "select id, uid from {} where id > {} order by id limit {}".format(self.table, start_id, batch_n)
         print(sql)
         self.cursor.execute(sql)
         result = self.cursor.fetchall()
         for row in result:
-            print(row[0])
+            print(row)
 
     def print_log(self):
         logging.info("******* reclib redis scanner info {} *********".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
