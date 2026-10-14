@@ -17,7 +17,7 @@ class NoneFilter(Filter):
         self.dump_file = kwargs.get("dump_file", "")
         self._dump_fh = None
 
-    def _dump(self, mid, reason):
+    def _dump(self, mid, reason, midinfo):
         if not self.dump_file:
             return
         if self._dump_fh is None:
@@ -25,8 +25,13 @@ class NoneFilter(Filter):
             if parent and not os.path.isdir(parent):
                 os.makedirs(parent, exist_ok=True)
             self._dump_fh = open(self.dump_file, "w", encoding="utf-8")
-        # 格式：mid \t fid \t 过滤原因
-        self._dump_fh.write("{}\t{}\t{}\n".format(mid, self.fid, reason))
+        # 格式：mid \t fid \t 过滤原因 \t status \t created_at \t expired_at \t updated_at
+        status = midinfo.get("status", "")
+        created_at = midinfo.get("created_at", "")
+        expired_at = midinfo.get("expired_at", "")
+        updated_at = midinfo.get("updated_at", "")
+        self._dump_fh.write("{}\t{}\t{}\t{}\t{}\t{}\t{}\n".format(
+            mid, self.fid, reason, status, created_at, expired_at, updated_at))
 
     def reset(self):
         super(NoneFilter, self).reset()
@@ -45,15 +50,15 @@ class NoneFilter(Filter):
         # 依次区分三种过滤原因，便于排查物料问题
         if self.fid not in midinfo:
             # 特征不存在
-            self._dump(mid, "fid_not_exist")
+            self._dump(mid, "fid_not_exist", midinfo)
             return False
         val = midinfo[self.fid]
         if not val:
             # 特征值为空（空字符串 / 0 / None）
-            self._dump(mid, "value_empty")
+            self._dump(mid, "value_empty", midinfo)
             return False
         if val == "NULL":
             # 特征值为字符串 "NULL"
-            self._dump(mid, "value_NULL")
+            self._dump(mid, "value_NULL", midinfo)
             return False
         return True
